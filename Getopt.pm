@@ -1,14 +1,14 @@
 # -*- perl -*-
 
 #
-# $Id: Getopt.pm,v 1.40 2001/04/05 07:37:54 eserte Exp $
+# $Id: Getopt.pm,v 1.45 2002/08/02 12:55:32 eserte Exp $
 # Author: Slaven Rezic
 #
 # Copyright (C) 1997,1998,1999,2000 Slaven Rezic. All rights reserved.
 # This package is free software; you can redistribute it and/or
 # modify it under the same terms as Perl itself.
 #
-# Mail: eserte@cs.tu-berlin.de
+# Mail: slaven.rezic@berlin.de
 # WWW:  http://user.cs.tu-berlin.de/~eserte/
 #
 
@@ -24,7 +24,7 @@ use constant OPTTYPE  => 1;
 use constant DEFVAL   => 2;
 use constant OPTEXTRA => 3;
 
-$VERSION = '0.44';
+$VERSION = '0.48';
 
 $DEBUG = 0;
 $x11_pass_through = 0;
@@ -178,11 +178,13 @@ sub set_defaults {
 	if (defined $opt->[DEFVAL]) {
 	    my $ref = ref $self->_varref($opt);
 	    if      ($ref eq 'ARRAY') {
-		@ {$self->_varref($opt)} = $opt->[DEFVAL];
+		@ {$self->_varref($opt)} = @{ $opt->[DEFVAL] };
 	    } elsif ($ref eq 'HASH') {
-		% {$self->_varref($opt)} = $opt->[DEFVAL];
-	    } else {
+		% {$self->_varref($opt)} = %{ $opt->[DEFVAL] };
+	    } elsif ($ref eq 'SCALAR') {
 		$ {$self->_varref($opt)} = $opt->[DEFVAL];
+	    } else {
+		die "Invalid reference type for option $opt->[OPTNAME]";
 	    }
 	}
     }
@@ -383,12 +385,13 @@ sub process_options {
 		&$callback;
 	    }
 	}
-	if ($_->[OPTEXTRA]{'strict'}) {
+	if ($_->[OPTEXTRA]{'strict'} &&
+	    UNIVERSAL::isa($_->[OPTEXTRA]{'choices'},'ARRAY')) {
 	    # check for valid values (valid are: choices and default value)
 	    my $v = $ {$self->_varref($_)};
 	    my @choices = @{$_->[OPTEXTRA]{'choices'}};
 	    push(@choices, $_->[DEFVAL]) if defined $_->[DEFVAL];
-	    if (!grep(/^$v$/, @choices)) {
+	    if (!grep($_ eq $v, @choices)) {
 		if (defined $former) {
 		    warn "Not allowed: " . $ {$self->_varref($_)}
 		    . " for $opt. Using old value $former->{$opt}";
@@ -476,8 +479,12 @@ sub _list_widget {
     my @optlist = @{$opt->[OPTEXTRA]{'choices'}};
     unshift(@optlist, $opt->[DEFVAL]) if defined $opt->[DEFVAL];
     my $o;
+    my %seen;
     foreach $o (@optlist) {
-	$w->insert("end", $o);
+	if (!$seen{$o}) {
+	    $w->insert("end", $o);
+	    $seen{$o}++;
+	}
     }
     $w;
 }
@@ -519,6 +526,11 @@ sub _string_widget {
 
 sub _dir_select {
     my($top, $curr_dir) = @_;
+
+    if (eval { require Tk::DirSelect; Tk::DirSelect->VERSION("1.03"); 1 }) {
+	return $top->DirSelect(-directory => $curr_dir)->Show;
+    }
+
     require Tk::DirTree;
     my $t = $top->Toplevel;
     $t->title("Choose directory:");
@@ -557,8 +569,9 @@ sub _dir_select {
 	       -command => sub { $ok =  1 })->pack(-side => 'left');
     $f->Button(-text => 'Cancel',
 	       -command => sub { $ok = -1 })->pack(-side => 'left');
+    $t->OnDestroy(sub { $ok = -1 });
     $f->waitVariable(\$ok);
-    $t->destroy;
+    $t->destroy if Tk::Exists($t);
     if ($ok == 1) {
 	$curr_dir;
     } else {
@@ -581,9 +594,18 @@ sub _filedialog_widget {
 	    $e->insert("end", $o);
 	}
     } else {
-	($e) = $self->_fix_layout($topframe, "Entry",
-				  -textvariable => $self->_varref($opt));
-
+	if (!eval '
+               use Tk::PathEntry;
+               my $real_e;
+               ($e, $real_e) = $self->_fix_layout($topframe, "PathEntry",
+                                                  -textvariable => $self->_varref($opt));
+               # XXX Escape is already used for cancelling Tk::Getopt
+               $real_e->bind("<$_>" => sub { $real_e->Finish }) for (qw/Return/);
+               1;
+           ') {
+	    ($e) = $self->_fix_layout($topframe, "Entry",
+				      -textvariable => $self->_varref($opt));
+	}
     }
     $e->pack(-side => 'left');
 
@@ -855,9 +877,22 @@ sub _do_undo {
     foreach $opt ($self->_opt_array) {
 	next if $opt->[OPTEXTRA]{'nogui'};
 	if (exists $undo_options->{$opt->[OPTNAME]}) {
-	    my $swap = $ {$self->_varref($opt)};
-	    $ {$self->_varref($opt)} = $undo_options->{$opt->[OPTNAME]};
-	    $undo_options->{$opt->[OPTNAME]} = $swap;
+	    my $ref = ref $self->_varref($opt);
+	    if      ($ref eq 'ARRAY') {
+		my @swap = @ {$self->_varref($opt)};
+		@ {$self->_varref($opt)} = @{ $undo_options->{$opt->[OPTNAME]} };
+		@{ $undo_options->{$opt->[OPTNAME]}} = @swap;
+	    } elsif ($ref eq 'HASH') {
+		my %swap = % {$self->_varref($opt)};
+		% {$self->_varref($opt)} = %{ $undo_options->{$opt->[OPTNAME]} };
+		%{ $undo_options->{$opt->[OPTNAME]}} = %swap;
+	    } elsif ($ref eq 'SCALAR') {
+		my $swap = $ {$self->_varref($opt)};
+		$ {$self->_varref($opt)} = $undo_options->{$opt->[OPTNAME]};
+		$undo_options->{$opt->[OPTNAME]} = $swap;
+	    } else {
+		die "Invalid reference type for option $opt->[OPTNAME]";
+	    }
 	}
     }
 }
@@ -900,8 +935,10 @@ sub option_editor {
 	    @{ $undo_options{$opt->[OPTNAME]} } = @ {$self->_varref($opt)};
 	} elsif ($ref eq 'HASH') {
 	    %{ $undo_options{$opt->[OPTNAME]} } = % {$self->_varref($opt)};
-	} else {
+	} elsif ($ref eq 'SCALAR') {
 	    $undo_options{$opt->[OPTNAME]}      = $ {$self->_varref($opt)};
+	} else {
+	    die "Invalid reference type for option $opt->[OPTNAME]";
 	}
     }
 
@@ -1658,6 +1695,32 @@ Here is an example for using a complex opttable description:
           # longer help displayed in the GUI's help window
           ]);
 
+=head1 COMPATIBILITY
+
+The argument to -opttable can be converted to a C<Getopt::Long>
+compatible argument list with the following function:
+
+  sub opttable_to_getopt {
+      my(%args) = @_;
+      my $options = $args{-options};
+      my @getopt;
+      for (@{$args{-opttable}}) {
+  	if (ref $_) {
+  	    push @getopt, $_->[0].$_->[1];
+  	    if (defined $_->[3] and ref $_->[3] ne 'HASH') {
+  		my %h = splice @$_, 3;
+  		$_->[3] = \%h;
+  	    }
+  	    if ($_->[3]{'var'}) {
+  		push @getopt, $_->[3]{'var'};
+  	    } else {
+  		push @getopt, \$options->{$_->[0]};
+  	    }
+  	}
+      }
+      @getopt;
+  }
+
 =head1 REQUIREMENTS
 
 You need at least:
@@ -1716,7 +1779,7 @@ This should be done only by Apply and Ok buttons.
 
 =head1 AUTHOR
 
-Slaven Rezic <eserte@cs.tu-berlin.de>
+Slaven Rezic <slaven.rezic@berlin.de>
 
 This package is free software; you can redistribute it and/or
 modify it under the same terms as Perl itself.
