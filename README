@@ -1,0 +1,18 @@
+Tk::Getopt
+
+	User configuration window for Tk with interface to Getopt::Long
+
+You need at least:
+	perl5.003
+	Tk400.202
+	Data-Dumper-2.0x (not unconditionally necessary)
+
+Installation:
+
+	perl Makefile.PL
+	make
+	make test
+	make install
+
+Author:
+	Slaven Rezic <eserte@cs.tu-berlin.de>
