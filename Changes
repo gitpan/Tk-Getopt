@@ -1,5 +1,9 @@
 Revision history for Perl extension Tk::Getopt.
 
+0.32  Wed Nov 12 00:10:19 CET 1997
+	- use FileDialog widget (subtype => 'file')
+	- many bug fixes and optimizations
+
 0.30  Wed Mar 12 14:01:56 MET 1997
 	Too many to list. Here are the most important:
 	- renamed to Tk::Getopt (former Tk::Options)

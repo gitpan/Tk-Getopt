@@ -1,22 +1,23 @@
 # -*- perl -*-
 
 #
-# $Id: Getopt.pm,v 1.10 1997/03/12 13:07:09 eserte Exp $
+# $Id: Getopt.pm,v 1.18 1997/11/11 23:20:15 eserte Exp $
 # Author: Slaven Rezic
 #
 # Copyright © 1997 Slaven Rezic. All rights reserved.
 # This package is free software; you can redistribute it and/or
 # modify it under the same terms as Perl itself.
 #
-# Mail: <URL:mailto:eserte@cs.tu-berlin.de>
-# WWW:  <URL:http://www.cs.tu-berlin.de/~eserte/>
+# Mail: eserte@cs.tu-berlin.de
+# WWW:  http://user.cs.tu-berlin.de/~eserte/
 #
 
 package Tk::Getopt;
+require 5.003;
 use strict;
 use vars qw($loadoptions $VERSION);
 
-$VERSION = '0.30';
+$VERSION = '0.33';
 
 sub new {
     my($pkg, %a) = @_;
@@ -46,7 +47,7 @@ sub new {
 	    my $opt = shift @optionlist;
 	    # Strip leading prefix so people can specify "--foo=i"
 	    # if they like.
-	    $opt = $' if $opt =~ /^($genprefix)+/;
+	    $opt = $2 if $opt =~ /^($genprefix)+(.*)$/;
 
 	    if ($opt !~ /^(\w+[-\w|]*)?(!|[=:][infse][@%]?)?$/) {
 		warn "Error in option spec: \"", $opt, "\"\n";
@@ -88,7 +89,7 @@ sub new {
     $self->{'filename'} = delete $a{'-filename'};
     $self->{'nosafe'}   = delete $a{'-nosafe'};
 
-    die "Unknown arguments: " . join(" ", %a) if %a != ();
+    die "Extra arguments: " . join(" ", %a) if %a;
 
     bless $self, $pkg;
 }
@@ -245,19 +246,25 @@ sub usage {
 }
 
 sub process_options {
-    my($self, $former) = @_;
+    my($self, $former, $fromgui) = @_;
     my $options = $self->{'options'};
     foreach ($self->_opt_array) {
 	my $opt = $_->[0];
-	if (exists $_->[3]{'callback'}) {
-	    # execute callback if value changed
+	if ($_->[3]{'callback'}) {
+	    # no warnings here ... it would be too complicated to catch 
+	    # all undefined values
+	    my $old_w = $^W;
+	    local($^W) = 0; 
+	    # execute callback if value has changed
 	    if (!(defined $former
-		  && $ {$self->_varref($_)} eq $former->{$opt})) {
+		  && (!exists $former->{$opt} 
+		      || $ {$self->_varref($_)} eq $former->{$opt}))) {
+		local($^W) = $old_w; # fall back to original value
 		&{$_->[3]{'callback'}};
 	    }
 	}
 	if ($_->[3]{'strict'}) {
-	    # check vor valid values
+	    # check for valid values
 	    my $v = $ {$self->_varref($_)};
 	    if (!grep(/^$v$/, @{$_->[3]{'choices'}})) {
 		if (defined $former) {
@@ -265,7 +272,8 @@ sub process_options {
 		    . " for $opt. Using old value $former->{$opt}";
 		    $ {$self->_varref($_)} = $former->{$opt};
 		} else {
-		    die "Not allowed: " . $ {$self->_varref($_)} . " for $opt";
+		    die "Not allowed: " 
+		      . $ {$self->_varref($_)} . " for $opt";
 		}
 	    }
 	}
@@ -329,6 +337,39 @@ sub _string_widget {
     }
 }
 
+sub _filedialog_widget {
+    my($self, $frame, $opt) = @_;
+    if (exists $opt->[3]{'choices'}) {
+	$self->_list_widget($frame, $opt);
+    } else {
+	my $topframe = $frame->Frame;
+	my $e = $topframe->Entry(-textvariable => $self->_varref($opt));
+	$e->pack(-side => 'left');
+	my $b = $topframe->Button
+	  (-text => 'Browse...',
+	   -command => sub {
+	       require Tk::FileDialog;
+	       require File::Basename;
+	       # XXX set FileDialog options via $opt->[3]{'filedialog_opt'}
+	       my $filedialog = $topframe->FileDialog(-Title => 'Select file');
+	       my($dir, $base, $file);
+	       my $act_val = $ {$self->_varref($opt)};
+	       if ($act_val) {
+		   $file = $filedialog->Show
+		     (-Path => File::Basename::dirname($act_val),
+		      -File => File::Basename::basename($act_val));
+	       } else {
+		   $file = $filedialog->Show;
+	       }
+	       if ($file) {
+		   $ {$self->_varref($opt)} = $file;
+	       }
+	   });
+	$b->pack(-side => 'left');
+	$topframe;
+    }
+}
+
 # Creates one page of the Notebook widget
 # Arguments:
 #   $optnote: Notebook widget
@@ -336,8 +377,8 @@ sub _string_widget {
 #   $optlist: list of options for this Notebook page
 #   $balloon: Balloon widget
 sub _create_page {
-    my($self, $optnote, $current_top, $optlist, $balloon) = @_;
-    my $current_page = $optnote->{$current_top};
+    my($self, $current_page, $optnote, $current_top, $optlist, $balloon) = @_;
+    $current_page = $optnote->{$current_top} if !defined $current_page;
     my $opt;
     my $row = -1;
     foreach $opt (@{$optlist->{$current_top}}) {
@@ -348,34 +389,38 @@ sub _create_page {
 	    $label = $opt->[3]{'label'};
 	} else {
 	    $label = $opt->[0];
-	    if ($label =~ /^(.*)-/ && $1 eq $current_top) {
-		$label = $';
+	    if ($label =~ /^(.*)-(.*)$/ && $1 eq $current_top) {
+		$label = $2;
 	    }
 	}
 	$row++;
-	$f->Label(-text => $label)->grid(-row => $row, -column => 0,
-					 -sticky => 'w');
+	my $lw = $f->Label(-text => $label)->grid(-row => $row, -column => 0,
+						  -sticky => 'w');
 	if (exists $opt->[3]{'widget'}) {
 	    # own widget
 	    $w = &{$opt->[3]{'widget'}}($self, $f, $opt);
-	} elsif ($opt->[1] eq '!' or $opt->[1] eq '') {
+	} elsif (defined $opt->[1] && $opt->[1] eq '!' or $opt->[1] eq '') {
 	    $w = $self->_boolean_widget($f, $opt);
-	} elsif ($opt->[1] =~ /i/) {
+	} elsif (defined $opt->[1] && $opt->[1] =~ /i/) {
 	    $w = $self->_integer_widget($f, $opt);
-	} elsif ($opt->[1] =~ /f/) {
+	} elsif (defined $opt->[1] && $opt->[1] =~ /f/) {
 	    $w = $self->_float_widget($f, $opt);
-	} elsif ($opt->[1] =~ /s/) {
-	    $w = $self->_string_widget($f, $opt);
+	} elsif (defined $opt->[1] && $opt->[1] =~ /s/) {
+	    if (defined $opt->[3] && exists $opt->[3]{'subtype'} &&
+		$opt->[3]{'subtype'} eq 'file') {
+		$w = $self->_filedialog_widget($f, $opt);
+	    } else {
+		$w = $self->_string_widget($f, $opt);
+	    }
 	} else {
-	    warn "Can't generate options editor entry for $opt->[0]";
+	    warn "Can't generate option editor entry for $opt->[0]";
 	}
 	if (defined $w) {
 	    $w->grid(-row => $row, -column => 1, -sticky => 'w');
 	}
-	if (exists $opt->[3]{'help'} && defined $w) {
-	    if (defined $balloon) {
-		$balloon->attach($w, -msg => $opt->[3]{'help'});
-	    }
+	if (exists $opt->[3]{'help'} && defined $balloon) {
+	    $balloon->attach($w, -msg => $opt->[3]{'help'}) if defined $w;
+	    $balloon->attach($lw, -msg => $opt->[3]{'help'}) if defined $lw;
 	}
 	if (exists $opt->[3]{'longhelp'}) {
 	    $f->Button(-text => '?',
@@ -393,15 +438,28 @@ sub _create_page {
     }
 }
 
+sub _do_undo {
+    my($self, $undo_options) = @_;
+    my $opt;
+    foreach $opt ($self->_opt_array) {
+	if (exists $undo_options->{$opt->[0]}) {
+	    my $swap = $ {$self->_varref($opt)};
+	    $ {$self->_varref($opt)} = $undo_options->{$opt->[0]};
+	    $undo_options->{$opt->[0]} = $swap;
+	}
+    }
+}
+
 sub option_editor {
     my($self, $top, %a) = @_;
     my $callback  = delete $a{'-callback'};
     my $nosave    = delete $a{'-nosave'};
     my $toplevel  = delete $a{'-toplevel'} || 'Toplevel';
     my $use_statusbar = delete $a{'-statusbar'};
+    my $wait      = delete $a{'-wait'};
     my $string    = delete $a{'-string'};
     if (!defined $string) {
-	$string = {'optedit' => 'Options editor',
+	$string = {'optedit' => 'Option editor',
 		   'undo' => 'Undo',
 		   'lastsaved' => 'Last saved',
 		   'save' => 'Save',
@@ -417,47 +475,74 @@ sub option_editor {
     }
 
     require Tk;
-    require Tk::NoteBook;
-    require Tk::Balloon;
-    my $optedit = eval '$top->' . $toplevel . '(%a)';
-    die $@ if $@;
-    if ($optedit->can('-title')) {
-	$optedit->configure(-title => $string->{optedit});
-    }
-    my $optnote = $optedit->NoteBook(-ipadx => 6, -ipady => 6);
-    my $statusbar;
-    if ($use_statusbar) {
-	$statusbar = $optedit->Label;
-    }
-    my $balloon = $optnote->Balloon($use_statusbar 
-				    ? (-statusbar => $statusbar)
-				    : ());
-    my $nopage = 1;
-    $optnote->pack(-expand => 1, -fill => 'both');
-    my $current_top;
-    my $optlist = {};
+
+    my $dont_use_notebook = 1;
     foreach $opt (@{$self->{'opttable'}}) {
-	if (ref $opt ne 'ARRAY' || $nopage) {
-	    undef $nopage if ref $opt ne 'ARRAY';
-	    my $label = ($nopage ? $string->{'optedit'} : $opt);
-	    $current_top = lc($label);
-	    my $c = $current_top;
-	    $optlist->{$c} = [];
-	    $optnote->add($c,
-			  -label => $label,
-			  -anchor => 'w',
-			  -createcmd =>
-			  sub {
-			      $self->_create_page($optnote, $c,
-						  $optlist, $balloon);
-			  });
-	    if ($nopage) {
-		undef $nopage;
-		redo;
-	    }
-	} else {
+	if (ref $opt ne 'ARRAY') { # found header
+	    undef $dont_use_notebook;
+	    last;
+	}
+    }
+    if (!$dont_use_notebook) {
+	eval { require Tk::NoteBook };
+	$dont_use_notebook = 1 if $@;
+    }
+
+    my $dont_use_balloon;
+    eval { require Tk::Balloon };
+    $dont_use_balloon = 1 if $@;
+
+    my $opt_editor = eval '$top->' . $toplevel . '(%a)';
+    die $@ if $@;
+    eval { $opt_editor->configure(-title => $string->{optedit}) };
+    my $opt_notebook = ($dont_use_notebook ?
+			$opt_editor->Frame :
+			$opt_editor->NoteBook(-ipadx => 6, -ipady => 6));
+    my($statusbar, $balloon);
+    if (!$dont_use_balloon) {
+	if ($use_statusbar) {
+	    $statusbar = $opt_editor->Label;
+	}
+	$balloon = $opt_notebook->Balloon($use_statusbar 
+					  ? (-statusbar => $statusbar)
+					  : ());
+    }
+    $opt_notebook->pack(-expand => 1, -fill => 'both');
+
+    my $optlist = {};
+    my $current_top;
+    if ($dont_use_notebook) {
+	$current_top = $string->{'optedit'};
+	foreach $opt ($self->_opt_array) {
 	    push(@{$optlist->{$current_top}}, $opt)
 	      if !$opt->[3]{'nogui'};
+	}
+	$self->_create_page($opt_notebook, undef, $current_top,
+			    $optlist, $balloon);
+    } else {
+	my @opttable = @{$self->{'opttable'}};
+	unshift(@opttable, $string->{'optedit'})
+	  if ref $opttable[0] eq 'ARRAY'; # put head
+	foreach $opt (@opttable) {
+	    if (ref $opt ne 'ARRAY') {
+		my $label = $opt;
+		$current_top = lc($label);
+		my $c = $current_top;
+		$optlist->{$c} = [];
+		$opt_notebook->add($c,
+				   -label => $label,
+				   -anchor => 'w',
+				   -createcmd =>
+				   sub {
+				       $self->_create_page
+					 (undef, # XXX remove in 400.203
+					  $opt_notebook, $c,
+					  $optlist, $balloon);
+                                   });
+	    } else {
+		push(@{$optlist->{$current_top}}, $opt)
+		  if !$opt->[3]{'nogui'};
+	    }
 	}
     }
 
@@ -465,22 +550,32 @@ sub option_editor {
 	$statusbar->pack(-fill => 'x', -anchor => 'w');
     }
 
-    my $f = $optedit->Frame;
+    my $f = $opt_editor->Frame;
     $f->pack(-anchor => 'w');
-    $f->Button(-text => $string->{'ok'},
-	       -command => sub { $self->process_options(\%undo_options);
-				 $optedit->destroy; }
-	      )->pack(-side => 'left');
-    $f->Button(-text => $string->{'cancel'},
-	       -command => sub { $optedit->destroy; }
-	      )->pack(-side => 'left');
+    my $ok_button
+      = $f->Button(-text => $string->{'ok'},
+		   -underline => 0,
+		   -command => sub {
+		       $self->process_options(\%undo_options, 1);
+		       if (!$dont_use_notebook) {
+			   $self->{'raised'} = $opt_notebook->raised();
+		       }
+		       $opt_editor->destroy;
+		   }
+		  )->pack(-side => 'left');
+    my $cancel_button
+      = $f->Button(-text => $string->{'cancel'},
+		   -command => sub {
+		       $self->_do_undo(\%undo_options);
+		       if (!$dont_use_notebook) {
+			   $self->{'raised'} = $opt_notebook->raised();
+		       }
+		       $opt_editor->destroy;
+		   }
+		  )->pack(-side => 'left');
     $f->Button(-text => $string->{'undo'},
 	       -command => sub {
-		   my $opt;
-		   foreach $opt ($self->_opt_array) {
-		       $ {$self->_varref($opt)} = $undo_options{$opt->[0]}
-		         if exists $undo_options{$opt->[0]}; 
-		   }
+		   $self->_do_undo(\%undo_options);
 	       }
 	      )->pack(-side => 'left');
     if ($self->{'filename'}) {
@@ -511,9 +606,25 @@ sub option_editor {
 	       }
 	      )->pack(-side => 'left');
 
-    &$callback($self, $optedit) if $callback;
+    &$callback($self, $opt_editor) if $callback;
 
-    $optedit;
+    if (!$dont_use_notebook && defined $self->{'raised'}) {
+	$opt_notebook->raise($self->{'raised'});
+    }
+
+    $opt_editor->bind('<Escape>' => sub { $cancel_button->invoke });
+
+    if ($opt_editor->can('Popup')) {
+	$opt_editor->Popup;
+    }
+    if ($wait) {
+	my $wait_var = 1;
+	$opt_editor->OnDestroy(sub { undef $wait_var });
+	$opt_editor->grab;
+	$opt_editor->waitVariable(\$wait_var);
+    }
+
+    $opt_editor;
 }
 
 1;
@@ -569,7 +680,7 @@ B<Getopt::Long::GetOptions>.
 
 =head1 METHODS
 
-=over 4
+=over
 
 =item B<new Tk::Getopt(>I<arg_hash>B<)>
 
@@ -583,14 +694,14 @@ or B<-opttable> are mandatory.
 
 The arguments for B<new> are:
 
-=over 8
+=over
 
 =item -getopt
 
 B<-getopt> should be a reference to a hash or an array. This hash has the
 same format as the argument to the B<Getopt::Long::GetOptions> function.
 Look at L<Getopt::Long> for a detailed description. Note
-also that not all of B<GetOptions> is implemented, see L<BUGS> for further
+also that not all of B<GetOptions> is implemented, see L<"BUGS"> for further
 information.
 
 Example:
@@ -613,7 +724,7 @@ the default value (otherwise the default is undefined). The fourth
 element is optional too and describes further attributes. It have to be a
 reference to a hash with following keys:
 
-=over 12
+=over
 
 =item alias
 
@@ -634,7 +745,7 @@ A long help string used by B<option_editor>.
 
 =item choices
 
-An array of additional choices for the options editor.
+An array of additional choices for the option editor.
 
 =item range
 
@@ -644,6 +755,11 @@ An array with the beginning and end of a range for an integer or float value.
 
 Must be used with B<choices> or B<range>. When set to true, options have to
 match either the choices or the range.
+
+=item subtype
+
+Current the only permitted subtype is I<file> to be used with string
+options. The GUI interface will pop up a file dialog for this option.
 
 =item var
 
@@ -670,38 +786,41 @@ Do not use a safe compartment when loading options (see B<load_options>.
 
 Here is an example for this rather complicated argument:
 
-    @opttable = (['debug', # name of the option (--debug)
-                  '!',     # type boolean, accept --nodebug
-                  0,       # default is 0 (false)
-                  {'callback' => sub { $^W = 1 
-                                         if $options->{'debug'}; }
-                  # additional attribute: callback to be called if
-                  # you set or change the value
-                  }],
-                 ['age',
-                  '=i',    # option accepts integer value
-                  18,
-                  {'strict' => 1, # value must be in range
-                   'range' => [0, 100], # allowed range
-                   'alias' => ['year', 'years'] # possible aliases
-                  }],
-                 ['browser',
-                  '=s',    # option accepts string value
-                  'tkweb',
-                  {'choices' => ['mosaic', 'netscape',
-                                 'lynx', 'chimera'],
-                   # choices for the list widget in the GUI
-                   'label' => 'WWW browser program'
-                   # label for the GUI instead of 'browser'
-                  }],
-                 ['foo',
-                  '=f',    # option accepts float value
-                  undef,   # no default value
-                  {'help' => 'This is a short help',
-                   # help string for usage() and the help balloon
-                   'longhelp' => 'And this is a slightly longer help'
-                   # longer help displayed in the GUI's help window
-                  }]);
+    @opttable =
+        ('Misc',   # Head of first group
+	 ['debug', # name of the option (--debug)
+          '!',     # type boolean, accept --nodebug
+          0,       # default is 0 (false)
+          {'callback' => sub { $^W = 1 
+                                  if $options->{'debug'}; }
+           # additional attribute: callback to be called if
+           # you set or change the value
+          }],
+         ['age',
+          '=i',    # option accepts integer value
+          18,
+          {'strict' => 1, # value must be in range
+           'range' => [0, 100], # allowed range
+           'alias' => ['year', 'years'] # possible aliases
+          }],
+	 'External', # Head of second group
+         ['browser',
+          '=s',    # option accepts string value
+          'tkweb',
+          {'choices' => ['mosaic', 'netscape',
+                         'lynx', 'chimera'],
+           # choices for the list widget in the GUI
+           'label' => 'WWW browser program'
+           # label for the GUI instead of 'browser'
+          }],
+         ['foo',
+          '=f',    # option accepts float value
+          undef,   # no default value
+          {'help' => 'This is a short help',
+           # help string for usage() and the help balloon
+           'longhelp' => 'And this is a slightly longer help'
+           # longer help displayed in the GUI's help window
+          }]);
     new Tk::Options(-opttable => \@opttable,
                     -options => \%options);
 
@@ -746,7 +865,7 @@ Gets options via B<GetOptions>. Returns the same value as B<GetOptions>, i.e.
 If you want to process options which does not appear in the GUI, you have
 two alternatives:
 
-=over 8
+=over
 
 =item *
 
@@ -796,7 +915,7 @@ default options file.
 The first argument is the parent widget. Further optional arguments are
 passed as a hash:
 
-=over 8
+=over
 
 =item -callback
 
@@ -824,6 +943,10 @@ Change button labels and title. This argument should be a hash reference
 with following keys: C<optedit>, C<undo>, C<lastsaved>, C<save>, C<defaults>,
 C<ok>, C<cancel>.
 
+=item -wait
+
+Do not return immediately, but rather wait for the user pressing OK or Cancel.
+
 =back
 
 Since the option editor uses the C<NoteBook> widget, options may be
@@ -837,7 +960,7 @@ Note: this method returns immediately to the calling program.
 
 Buttons in the option editor window:
 
-=over 8
+=over
 
 =item OK
 
@@ -849,7 +972,7 @@ Set old values and close option editor window.
 
 =item Undo
 
-Set old values.
+Set old values. Further selections toggle between new and old values.
 
 =item Last saved
 
@@ -865,7 +988,7 @@ in C<new>.
 
 The option types are translated to following widgets:
 
-=over 8
+=over
 
 =item Boolean
 
@@ -886,19 +1009,39 @@ B<BrowseEntry> if B<choices> is set, otherwise B<entry> (B<_string_widget>).
 
 =head1 REQUIREMENTS
 
-C<Tk::Getopt> needs C<Data::Dumper> (Version 2.07) for saving options and, of
-course, the C<Tk> (Version 400.202) package, if you want to use the graphical
-interface. You can found these packages at CPAN.
+You need at least:
+
+=over
+
+=item *
+
+perl5.004 (perl5.003 near 5.004 may work too, e.g perl5.003_26)
+
+=item *
+
+Tk400.202 (better: Tk400.203) (only if you want the GUI)
+
+=item *
+
+Data-Dumper-2.07 (only if you want to save options)
+
+=back
 
 =head1 BUGS
 
 Not all of Getopt::Long is supported (array and hash options, <>, alias names,
 abbrevs).
 
-The Options editor probably should be a real widget.
+The option editor probably should be a real widget.
+
+The option editor window may grow very large if NoteBook is not used (should
+use a scrollable frame).
 
 You should use Tk400.203, since Tk::Balloon has a bug when its parent
 window is destroyed.
+
+You should use Tk402.204, since Tk::NoteBook issues some warnings when it
+gets destroyed (as of Nov 12, 1997, Tk402.204 is not released).
 
 The API will not be stable until version 1.00.
 

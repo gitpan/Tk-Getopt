@@ -8,7 +8,6 @@
 # (It may become useful if the test is moved to ./t subdirectory.)
 
 BEGIN { $| = 1; print "1..1\n"; }
-BEGIN { unshift(@INC, "/home/e/eserte/lib/perl")}
 
 END {print "not ok 1\n" unless $loaded;}
 
@@ -21,9 +20,12 @@ $loaded = 1;
    ['adbfile', '=s', undef, 
     {'alias' => ['f'],
      'help' => 'The default database file',
-     'longhelp' => "This is an example for a longer help\nYou can use multiple lines\n"}],
-   ['exportfile', '=s', undef],
-   ['dumpfile', '=s', '/tmp/dump'],
+     'longhelp' => "This is an example for a longer help\nYou can use multiple lines\n",
+     'subtype' => 'file',
+    }],
+   ['exportfile', '=s', undef,
+    {'subtype' => 'file'}],
+    ['dumpfile', '=s', '/tmp/dump', {'subtype' => 'file'}],
    ['autoload', '!', 0,
     {'help' => 'Turns autoloading of the default database file on or off'}],
    
@@ -128,8 +130,8 @@ $loaded = 1;
 $options = {};
 $optfilename = "t/opttest";
 $opt = new Tk::Getopt(-opttable => \@opttable,
-		       -options => $options,
-		       -filename => $optfilename);
+		      -options => $options,
+		      -filename => $optfilename);
 
 $opt->set_defaults;
 $opt->load_options;
@@ -139,18 +141,29 @@ if (!$opt->get_options) {
 $top = new MainWindow;
 $top->withdraw;
 
-eval {$opt->process_options};
+#eval {$opt->process_options};
+$opt->process_options;
+if ($@) { warn $@ }
 
-$w = $opt->option_editor($top, -statusbar => 1);
+my $w;
+use Data::Dumper;
+$timer = $top->after(60*1000, sub {
+			 $t2 = $top->Toplevel(-popover => 'cursor');
+			 $t2->Label(-text => "Self-destruction in 5s")->pack;
+			 $t2->Popup;
+			 $top->after(5*1000, sub { $w->destroy })
+		     });
+
+$w = $opt->option_editor($top,
+			 -statusbar => 1,
+			 -popover => 'cursor',
+			 '-wait' => 1);
+$timer->cancel;
+
+$w = $opt->option_editor($top);
 $w->OnDestroy(sub {$top->destroy});
+$top->after(5*1000, sub { $w->destroy });
 
-$top->after(60*1000, sub {
-		$t2 = $top->Toplevel(-popover => 'cursor');
-		$t2->Label(-text => "Self-destruction in 5s")->pack;
-		$t2->Popup;
-		$top->after(5*1000, sub { $top->destroy });
-	    });
-			     
 MainLoop;
 #foreach (sort keys %$options) {
 #    print "$_ = ", $options->{$_}, "\n";
