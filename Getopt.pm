@@ -1,7 +1,7 @@
 # -*- perl -*-
 
 #
-# $Id: Getopt.pm,v 1.35 2000/09/10 21:29:09 eserte Exp $
+# $Id: Getopt.pm,v 1.40 2001/04/05 07:37:54 eserte Exp $
 # Author: Slaven Rezic
 #
 # Copyright (C) 1997,1998,1999,2000 Slaven Rezic. All rights reserved.
@@ -16,14 +16,15 @@ package Tk::Getopt;
 require 5.003;
 use strict;
 use vars qw($loadoptions $VERSION $x11_pass_through
-	    $CHECKMARK_OFF $CHECKMARK_ON $DEBUG
+	    $CHECKMARK_OFF $CHECKMARK_ON
+	    $FILE_IMAGE $CURR_GEOMETRY_IMAGE $DEBUG
 	   );
 use constant OPTNAME  => 0;
 use constant OPTTYPE  => 1;
 use constant DEFVAL   => 2;
 use constant OPTEXTRA => 3;
 
-$VERSION = '0.42';
+$VERSION = '0.44';
 
 $DEBUG = 0;
 $x11_pass_through = 0;
@@ -164,12 +165,25 @@ sub _varref {
     }
 }
 
+sub _is_separator {
+    my $opt = shift;
+    defined $opt->[OPTNAME] && $opt->[OPTNAME] eq '' &&
+    defined $opt->[DEFVAL]  && $opt->[DEFVAL] eq '-';
+}
+
 sub set_defaults {
     my $self = shift;
     my $opt;
     foreach $opt ($self->_opt_array) {
 	if (defined $opt->[DEFVAL]) {
-	    $ {$self->_varref($opt)} = $opt->[DEFVAL];
+	    my $ref = ref $self->_varref($opt);
+	    if      ($ref eq 'ARRAY') {
+		@ {$self->_varref($opt)} = $opt->[DEFVAL];
+	    } elsif ($ref eq 'HASH') {
+		% {$self->_varref($opt)} = $opt->[DEFVAL];
+	    } else {
+		$ {$self->_varref($opt)} = $opt->[DEFVAL];
+	    }
 	}
     }
 }
@@ -348,7 +362,15 @@ sub process_options {
     my $options = $self->{'options'};
     foreach ($self->_opt_array) {
 	my $opt = $_->[OPTNAME];
-	if ($_->[OPTEXTRA]{'callback'}) {
+
+	my $callback;
+	if ($fromgui) {
+	    $callback = $_->[OPTEXTRA]{'callback-interactive'};
+	}
+	if (!$callback) {
+	    $callback = $_->[OPTEXTRA]{'callback'};
+	}
+	if ($callback) {
 	    # no warnings here ... it would be too complicated to catch
 	    # all undefined values
 	    my $old_w = $^W;
@@ -358,7 +380,7 @@ sub process_options {
 		  && (!exists $former->{$opt}
 		      || $ {$self->_varref($_)} eq $former->{$opt}))) {
 		local($^W) = $old_w; # fall back to original value
-		&{$_->[OPTEXTRA]{'callback'}};
+		&$callback;
 	    }
 	}
 	if ($_->[OPTEXTRA]{'strict'}) {
@@ -380,32 +402,49 @@ sub process_options {
     }
 }
 
+# try to work around weird browse entry
+sub _fix_layout {
+    my($self, $frame, $widget, %args) = @_;
+    my($w, $real_w);
+    if ($Tk::VERSION < 999) { # XXX
+	my $f = $frame->Frame;
+	$f->Label->pack(-side => "left"); # dummy
+	$real_w = $f->$widget(%args)->pack(-side => "left", -padx => 1);
+	$w = $f;
+    } else {
+	$w = $real_w = $frame->$widget(%args);
+    }
+    ($w, $real_w);
+}
+
 sub _boolean_widget {
     my($self, $frame, $opt) = @_;
-    $frame->Checkbutton(-variable => $self->_varref($opt));
+    ($self->_fix_layout($frame, "Checkbutton",
+			-variable => $self->_varref($opt)))[0];
 }
 
 sub _boolean_checkmark_widget {
     # XXX hangs with Tk800.014?!
     my($self, $frame, $opt) = @_;
     _create_checkmarks($frame);
-    $frame->Checkbutton(-variable => $self->_varref($opt),
+    ($self->_fix_layout($frame, "Checkbutton",
+			-variable => $self->_varref($opt),
 			-image => $CHECKMARK_OFF,
 			-selectimage => $CHECKMARK_ON,
 			-indicatoron => 0,
-		       );
+		       ))[0];
 }
 
 sub _number_widget {
     my($self, $frame, $opt) = @_;
-    $frame->Scale
-      (-orient => 'horizontal',
-       -from => $opt->[OPTEXTRA]{'range'}[0],
-       -to => $opt->[OPTEXTRA]{'range'}[1],
-       -showvalue => 1,
-       -resolution => ($opt->[OPTTYPE] =~ /f/ ? 0 : 1),
-       -variable => $self->_varref($opt)
-      );
+    ($self->_fix_layout($frame, "Scale",
+			-orient => 'horizontal',
+			-from => $opt->[OPTEXTRA]{'range'}[0],
+			-to => $opt->[OPTEXTRA]{'range'}[1],
+			-showvalue => 1,
+			-resolution => ($opt->[OPTTYPE] =~ /f/ ? 0 : 1),
+			-variable => $self->_varref($opt)
+		       ))[0];
 }
 
 sub _integer_widget {
@@ -448,28 +487,82 @@ sub _string_widget {
     if (exists $opt->[OPTEXTRA]{'choices'}) {
 	$self->_list_widget($frame, $opt);
     } else {
-	my $e = $frame->Entry(-textvariable => $self->_varref($opt));
-	if ($args{-restrict}) {
+	my($e, $ee) = $self->_fix_layout
+	    ($frame, "Entry",
+	     (defined $opt->[OPTEXTRA]{'length'}
+	      ? (-width => $opt->[OPTEXTRA]{'length'}) : ()),
+	     -textvariable => $self->_varref($opt));
+	if ($args{-restrict} || defined $opt->[OPTEXTRA]{'maxsize'}) {
+	    my $restrict_int   = sub { $_[0] =~ /^([+-]?\d+|)$/ };
+	    my $restrict_float = sub {
+		$_[0] =~ /^(|([+-]?)(?=\d|\.\d)\d*(\.\d*)?([Ee]([+-]?\d+))?)$/
+	    };
+	    my $restrict_len   = sub {
+		length $_[0] <= $opt->[OPTEXTRA]{'maxsize'}
+	    };
 	    eval {
-		if ($args{-restrict} eq "=i") {
-		    $e->configure
-			(-validate => "all",
-			 -vcmd => sub {
-			     $_[0] =~ /^([+-]?\d+|)$/;
-			 },
-			);
-		} elsif ($args{-restrict} eq "=f") {
-		    $e->configure
-			(-validate => "all",
-			 -vcmd => sub {
-			     $_[0] =~ /^(|([+-]?)(?=\d|\.\d)\d*(\.\d*)?([Ee]([+-]?\d+))?)$/;
-			 },
-			);
-		}
+		$ee->configure
+		    (-validate => "all",
+		     -vcmd => sub {
+			 ($args{-restrict} ne "=i" || $restrict_int->($_[0]))
+			     &&
+			 ($args{-restrict} ne "=f" || $restrict_float->($_[0]))
+			     &&
+			 (!defined $opt->[OPTEXTRA]{'maxsize'} || $restrict_len->($_[0]))
+		     });
 	    };
 	    warn $@ if $@;
 	}
 	$e;
+    }
+}
+
+sub _dir_select {
+    my($top, $curr_dir) = @_;
+    require Tk::DirTree;
+    my $t = $top->Toplevel;
+    $t->title("Choose directory:");
+    my $ok = 0; # flag: "1" means OK, "-1" means cancelled
+
+    # Create Frame widget before the DirTree widget, so it's always visible
+    # if the window gets resized.
+    my $f = $t->Frame->pack(-fill => "x", -side => "bottom");
+
+    my $d;
+    $d = $t->Scrolled('DirTree',
+		      -scrollbars => 'osoe',
+		      -width => 35,
+		      -height => 20,
+		      -selectmode => 'browse',
+		      -exportselection => 1,
+		      -browsecmd => sub { $curr_dir = shift;
+					  if ($^O ne 'MSWin32') {
+					      $curr_dir =~ s|^//|/|; # bugfix
+					  }
+				        },
+
+		      # With this version of -command a double-click will
+		      # select the directory
+		      -command   => sub { $ok = 1 },
+
+		      # With this version of -command a double-click will
+		      # open a directory. Selection is only possible with
+		      # the Ok button.
+		      #-command   => sub { $d->opencmd($_[0]) },
+		     )->pack(-fill => "both", -expand => 1);
+    # Set the initial directory
+    $d->chdir($curr_dir);
+
+    $f->Button(-text => 'Ok',
+	       -command => sub { $ok =  1 })->pack(-side => 'left');
+    $f->Button(-text => 'Cancel',
+	       -command => sub { $ok = -1 })->pack(-side => 'left');
+    $f->waitVariable(\$ok);
+    $t->destroy;
+    if ($ok == 1) {
+	$curr_dir;
+    } else {
+	undef;
     }
 }
 
@@ -488,17 +581,23 @@ sub _filedialog_widget {
 	    $e->insert("end", $o);
 	}
     } else {
-	$e = $topframe->Entry(-textvariable => $self->_varref($opt));
+	($e) = $self->_fix_layout($topframe, "Entry",
+				  -textvariable => $self->_varref($opt));
+
     }
     $e->pack(-side => 'left');
 
     my $b = $topframe->Button
-      (-text => 'Browse...',
+      (_get_browse_args($topframe),
        -command => sub {
 	   require File::Basename;
 	   my($fd, $filedialog);
-	   if ($Tk::VERSION >= 800 && $subtype ne 'dir') {
-	       $fd = 'getOpenFile';
+	   if ($Tk::VERSION >= 800) {
+	       if ($subtype eq 'dir') {
+		   $fd = '_dir_select';
+	       } else {
+		   $fd = 'getOpenFile';
+	       }
 	   } else {
 	       $fd = 'FileDialog';
 	       eval {
@@ -531,6 +630,8 @@ sub _filedialog_widget {
 # XXX erst ab 800.013 (?)
 #						  -force => 1,
 						 );
+	       } elsif ($fd eq '_dir_select') {
+		   $file = _dir_select($topframe, $dir);
 	       } elsif ($fd eq 'FileDialog') {
 		   $file = $filedialog->Show(-Path => $dir,
 					     -File => $base);
@@ -546,6 +647,9 @@ sub _filedialog_widget {
 	   } else {
 	       if ($fd eq 'getOpenFile') {
 		   $file = $topframe->getOpenFile(-title => 'Select file');
+	       } elsif ($fd eq '_dir_select') {
+		   require Cwd;
+		   $file = _dir_select($topframe, Cwd::cwd());
 	       } else {
 		   if ($subtype eq 'dir') {
 		       $file = $filedialog->Show(-verify => [qw(-d)]);
@@ -554,7 +658,7 @@ sub _filedialog_widget {
 		   }
 	       }
 	   }
-	   if ($file) {
+	   if (defined $file && $file ne "") {
 	       $ {$self->_varref($opt)} = $file;
 	   }
        });
@@ -562,8 +666,76 @@ sub _filedialog_widget {
     $topframe;
 }
 
+sub _geometry_widget {
+    my($self, $frame, $opt) = @_;
+    my($topframe, $e) = $self->_fix_layout
+	($frame,
+	 'Entry',
+	 (defined $opt->[OPTEXTRA]{'length'}
+	  ? (-width => $opt->[OPTEXTRA]{'length'}) : ()),
+	 -textvariable => $self->_varref($opt));
+    $topframe->Button(_get_curr_geometry_args($topframe),
+		      -command => sub {
+			  my $mw = $frame->MainWindow;
+			  $e->delete(0, "end");
+			  $e->insert("end", $mw->geometry);
+		      },
+		     )->pack(-side => "left");
+    $topframe;
+}
+
+sub _color_widget {
+    return shift->_string_widget(@_);
+
+    # XXX funktioniert leider nicht...
+    my($self, $frame, $opt) = @_;
+    my($topframe, $e) = $self->_fix_layout
+	($frame,
+	 'Entry',
+	 (defined $opt->[OPTEXTRA]{'length'}
+	  ? (-width => $opt->[OPTEXTRA]{'length'}) : ()),
+	 -textvariable => $self->_varref($opt));
+    if ($frame->can("chooseColor")) {
+	$topframe->Button(-text => "...",
+			  -padx => 0, -pady => 0,
+			  -command => sub {
+			      my $color = $frame->chooseColor;
+#				  (-initialcolor => $e->get);
+			      return unless defined $color;
+			      $e->delete(0, "end");
+			      $e->insert("end", $color);
+			  },
+			 )->pack(-side => "left");
+    }
+    $topframe;
+}
+
+sub _font_widget {
+    my($self, $frame, $opt) = @_;
+    my($topframe, $e) = $self->_fix_layout
+	($frame,
+	 'Entry',
+	 (defined $opt->[OPTEXTRA]{'length'}
+	  ? (-width => $opt->[OPTEXTRA]{'length'}) : ()),
+	 -textvariable => $self->_varref($opt));
+    if (eval {require Tk::Font; require Tk::FontDialog; 1}) {
+	$topframe->Button(-text => "...",
+			  -padx => 0, -pady => 0,
+			  -command => sub {
+			      my $font = $frame->FontDialog
+				  (-initfont => $e->get)->Show;
+			      return unless defined $font;
+			      $e->delete(0, "end");
+			      $e->insert("end", $font->Pattern);
+			  },
+			 )->pack(-side => "left");
+    }
+    $topframe;
+}
+
 # Creates one page of the Notebook widget
 # Arguments:
+#   $current_page: Frame for drawing
 #   $optnote: Notebook widget
 #   $current_top: title of Notebook page
 #   $optlist: list of options for this Notebook page
@@ -590,6 +762,21 @@ sub _create_page {
 
     foreach $opt (@{$optlist->{$current_top}}) {
 	my $f = $current_page;
+	$row++;
+	if (_is_separator($opt)) {
+	    my $separator = $f->Frame(-height => 2,
+				     )->grid(-row => $row,
+					     -column => 0,
+					     -columnspan => 3,
+					     -pady => 3,
+					     -padx => 3,
+					     -sticky => "ew");
+	    $separator->configure
+		(-fg => $separator->cget(-bg),
+		 -bg => $separator->Darken($separator->cget(-bg), 60));
+	    next;
+	}
+
 	my $label;
 	my $w;
 	if (exists $opt->[OPTEXTRA]{'label'}) {
@@ -600,7 +787,6 @@ sub _create_page {
 		$label = $2;
 	    }
 	}
-	$row++;
 	my $lw = $f->Label(-text => $label)->grid(-row => $row, -column => 0,
 						  -sticky => 'w');
 	if (exists $opt->[OPTEXTRA]{'widget'}) {
@@ -614,14 +800,19 @@ sub _create_page {
 	} elsif (defined $opt->[OPTTYPE] && $opt->[OPTTYPE] =~ /f/) {
 	    $w = $self->_float_widget($f, $opt);
 	} elsif (defined $opt->[OPTTYPE] && $opt->[OPTTYPE] =~ /s/) {
-	    if (defined $opt->[OPTEXTRA] &&
-		exists $opt->[OPTEXTRA]{'subtype'} &&
-		$opt->[OPTEXTRA]{'subtype'} eq 'file') {
+	    my $subtype = (defined $opt->[OPTEXTRA] &&
+			   exists $opt->[OPTEXTRA]{'subtype'} ?
+			   $opt->[OPTEXTRA]{'subtype'} : "");
+	    if ($subtype eq 'file') {
 		$w = $self->_filedialog_widget($f, $opt);
-	    } elsif (defined $opt->[OPTEXTRA] &&
-		     exists $opt->[OPTEXTRA]{'subtype'} &&
-		     $opt->[OPTEXTRA]{'subtype'} eq 'dir') {
+	    } elsif ($subtype eq 'dir') {
 		$w = $self->_filedialog_widget($f, $opt, -subtype => "dir");
+	    } elsif ($subtype eq 'geometry') {
+		$w = $self->_geometry_widget($f, $opt);
+	    } elsif ($subtype eq 'color') {
+		$w = $self->_color_widget($f, $opt);
+	    } elsif ($subtype eq 'font') {
+		$w = $self->_font_widget($f, $opt);
 	    } else {
 		$w = $self->_string_widget($f, $opt);
 	    }
@@ -678,9 +869,13 @@ sub option_editor {
     my $buttons   = delete $a{'-buttons'};
     my $toplevel  = delete $a{'-toplevel'} || 'Toplevel';
     my $pack      = delete $a{'-pack'};
+    my $transient = delete $a{'-transient'};
     my $use_statusbar = delete $a{'-statusbar'};
     my $wait      = delete $a{'-wait'};
     my $string    = delete $a{'-string'};
+    my $delay_page_create = (exists $a{'-delaypagecreate'}
+			     ? delete $a{'-delaypagecreate'}
+			     : 1);
     if (!defined $string) {
 	$string = {'optedit'   => 'Option editor',
 		   'undo'      => 'Undo',
@@ -700,7 +895,14 @@ sub option_editor {
     my $opt;
     foreach $opt ($self->_opt_array) {
 	next if $opt->[OPTEXTRA]{'nogui'};
-	$undo_options{$opt->[OPTNAME]} = $ {$self->_varref($opt)};
+	my $ref = ref $self->_varref($opt);
+	if      ($ref eq 'ARRAY') {
+	    @{ $undo_options{$opt->[OPTNAME]} } = @ {$self->_varref($opt)};
+	} elsif ($ref eq 'HASH') {
+	    %{ $undo_options{$opt->[OPTNAME]} } = % {$self->_varref($opt)};
+	} else {
+	    $undo_options{$opt->[OPTNAME]}      = $ {$self->_varref($opt)};
+	}
     }
 
     require Tk;
@@ -724,6 +926,7 @@ sub option_editor {
     my $cmd = '$top->' . $toplevel . '(%a)';
     my $opt_editor = eval $cmd;
     die "$@ while evaling $cmd" if $@;
+    $opt_editor->transient($transient) if $transient;
     eval { $opt_editor->configure(-title => $string->{optedit}) };
     my $opt_notebook = ($dont_use_notebook ?
 			$opt_editor->Frame :
@@ -753,31 +956,46 @@ sub option_editor {
     } else {
 	my @opttable = @{$self->{'opttable'}};
 	unshift(@opttable, $string->{'optedit'})
-	  if ref $opttable[OPTNAME] eq 'ARRAY'; # put head
+	    if ref $opttable[OPTNAME] eq 'ARRAY'; # put head
+
+	my $page_create_page;
 	foreach $opt (@opttable) {
 	    if (ref $opt ne 'ARRAY') {
+		if (!$delay_page_create && $page_create_page) {
+		    $page_create_page->();
+		    undef $page_create_page;
+		}
+
 		my $label = $opt;
 		$current_top = lc($label);
 		my $c = $current_top;
 		$optlist->{$c} = [];
 		$msglist->{$c} = "";
-		$opt_notebook->add($c,
-				   -label => $label,
-				   -anchor => 'w',
-				   -createcmd =>
-				   sub {
-				       $self->_create_page
-					 ($_[0],
-					  $opt_notebook, $c,
-					  $optlist, $balloon, $msglist);
-                                   });
-            } elsif ($opt->[OPTNAME] eq '') {
+		my $page_f;
+		$page_create_page = sub {
+		    $self->_create_page
+			($page_f,
+			 $opt_notebook, $c,
+			 $optlist, $balloon, $msglist);
+		};
+		$page_f = $opt_notebook->add
+		    ($c,
+		     -label => $label,
+		     -anchor => 'w',
+		     ($delay_page_create?(-createcmd => $page_create_page):()),
+		    );
+            } elsif ($opt->[OPTNAME] eq '' && !_is_separator($opt)) {
 		$msglist->{$current_top} = $opt->[DEFVAL];
 	    } else {
 		push @{$optlist->{$current_top}}, $opt
-		  if !$opt->[OPTEXTRA]{'nogui'};
+		    if !$opt->[OPTEXTRA]{'nogui'};
 	    }
 	}
+	if (!$delay_page_create && $page_create_page) {
+	    $page_create_page->();
+	    undef $page_create_page;
+	}
+
     }
 
     require Tk::Tiler;
@@ -954,6 +1172,34 @@ EOF
       unless $CHECKMARK_OFF;
 }
 
+sub _get_browse_args {
+    my $w = shift;
+    if (!defined $FILE_IMAGE) {
+	require Tk::Pixmap;
+	$FILE_IMAGE = $w->Pixmap(-file => Tk->findINC("openfolder.xpm"));
+	$FILE_IMAGE = 0 if (!$FILE_IMAGE);
+    }
+    if ($FILE_IMAGE) {
+	(-image => $FILE_IMAGE);
+    } else {
+	(-text => "Browse...");
+    }
+}
+
+sub _get_curr_geometry_args {
+    my $w = shift;
+    if (!defined $CURR_GEOMETRY_IMAGE) {
+	require Tk::Photo;
+	$CURR_GEOMETRY_IMAGE = $w->Photo(-file => Tk->findINC("win.xbm"));
+	$CURR_GEOMETRY_IMAGE = 0 if (!$CURR_GEOMETRY_IMAGE);
+    }
+    if ($CURR_GEOMETRY_IMAGE) {
+	(-image => $CURR_GEOMETRY_IMAGE);
+    } else {
+	(-text => "Geom.");
+    }
+}
+
 1;
 
 __END__
@@ -1057,6 +1303,9 @@ array will be used as an global message for the current option page.
 This message can be multi-line.
 Example:
     ['', '', 'This is an explanation for this option group.']
+
+To insert horizontal lines, use:
+    ['', '', '-']
 
 Here is an example for a simple opttable:
 
@@ -1196,6 +1445,13 @@ option editor, e.g. C<Frame> to embed the editor into another toplevel
 widget (do not forget to pack the frame!). See also the C<-pack>
 option below.
 
+=item -transient
+
+Set the transient flag on the toplevel window. See the description of
+the transient method in L<Tk::Wm>.
+
+    -transient => $mw
+
 =item -pack
 
 If using C<-toplevel> with a non-Toplevel widget (e.g. Frame) and
@@ -1293,6 +1549,15 @@ pairs with following keys:
 
 An array of aliases also accepted by F<Getopt::Long>.
 
+=item callback
+
+Call a subroutine every time the option changes (e.g. after pressing
+on Apply, Ok or after loading).
+
+=item callback-interactive
+
+Like C<callback>, but only applies in interactive mode.
+
 =item label
 
 A label to be displayed in the GUI instead of the option name.
@@ -1321,9 +1586,12 @@ match either the choices or the range.
 
 =item subtype
 
-The only permitted subtypes are I<file> and I<dir> to be used with
-string options. The GUI interface will pop up a file dialog for this
-option (either for selecting files or directories).
+The subtypes are I<file>, I<dir>, I<geometry>, I<font> and I<color>.
+These can be used with string options. For the first two, the GUI
+interface will pop up a file dialog for this option (either for
+selecting files or directories). If the I<geometry> subtype is
+specified, the user can set the current geometry of the main window.
+The I<color> subtype is not yet implemented.
 
 =item var
 
@@ -1333,6 +1601,14 @@ to store the value.
 =item nogui
 
 This option will not have an entry in the GUI.
+
+=item size
+
+Create an entry with the specified size.
+
+=item maxlength
+
+Restrict the maximum number of characters in entries.
 
 =item widget
 
