@@ -27,10 +27,12 @@ $loaded = 1;
     {'choices' => ["/tmp/export.dat", "$ENV{HOME}/export.dat"],
      'subtype' => 'file'}],
    ['dumpfile', '=s', '/tmp/dump', {'subtype' => 'file'}],
+   ['datadir', '=s', '/tmp', {'subtype' => 'dir'}],
    ['autoload', '!', 0,
     {'help' => 'Turns autoloading of the default database file on or off'}],
    
    'x11',
+   ['', '', "X11 related options like colors and fonts.\nThis is named `X11', but is also relevant for other windowing systems."],
    ['bg', '=s', undef, 
     {'callback' =>
      sub {
@@ -117,6 +119,8 @@ $loaded = 1;
    'adr2tex',
    ['adr2tex-cols', '=i', 8, {'range' => [2, 16],
 			      'help' => 'Number of columns'}],
+   ['adr2tex-rows', '=i', undef, {'help' => 'Number of rows'}],
+   ['adr2tex-width', '=f', undef, {'help' => 'page width in in'}],
    ['adr2tex-font', '=s', 'sf', 
     {'choices' => ['cmr5', 'cmr10', 'cmr17', 'cmss10', 'cmssi10',
 		   'cmtt10 scaled 500', 'cmtt10']}],
@@ -148,16 +152,28 @@ if ($@) { warn $@ }
 
 my $w;
 use Data::Dumper;
-$timer = $top->after(60*1000, sub {
-			 $t2 = $top->Toplevel(-popover => 'cursor');
-			 $t2->Label(-text => "Self-destruction in 5s")->pack;
-			 $t2->Popup;
-			 $top->after(5*1000, sub {
-					 foreach ($top->children) {
-					     $_->destroy;
-					 }
-				     })
-		     });
+
+my $batch_mode = !!$ENV{BATCH};
+my $timerlen = ($batch_mode ? 1000 : 60*1000);
+
+$timer = $top->after
+    ($timerlen,
+     sub {
+	 if ($batch_mode) {
+	     foreach ($top->children) {
+		 $_->destroy;
+	     }
+	 } else {
+	     $t2 = $top->Toplevel(-popover => 'cursor');
+	     $t2->Label(-text => "Self-destruction in 5s")->pack;
+	     $t2->Popup;
+	     $top->after(5*1000, sub {
+			     foreach ($top->children) {
+				 $_->destroy;
+			     }
+			 });
+	 }
+     });
 
 $w = $opt->option_editor($top,
 			 -statusbar => 1,
@@ -165,10 +181,14 @@ $w = $opt->option_editor($top,
 			 '-wait' => 1);
 $timer->cancel;
 
-$w = $opt->option_editor($top);
+$w = $opt->option_editor($top,
+                         -buttons => [qw/ok apply cancel defaults/]);
 $w->resizable(0,0);
 $w->OnDestroy(sub {$top->destroy});
-$top->after(5*1000, sub { $w->destroy });
+
+$timerlen = ($batch_mode ? 1000 : 5*1000);
+$top->after($timerlen, sub { $w->destroy });
+
 
 MainLoop;
 #foreach (sort keys %$options) {
