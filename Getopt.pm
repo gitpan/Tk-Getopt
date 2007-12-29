@@ -1,19 +1,19 @@
 # -*- perl -*-
 
 #
-# $Id: Getopt.pm,v 1.48 2003/09/16 11:57:19 eserte Exp eserte $
+# $Id: Getopt.pm,v 1.58 2007/12/29 13:20:38 eserte Exp $
 # Author: Slaven Rezic
 #
-# Copyright (C) 1997,1998,1999,2000,2003 Slaven Rezic. All rights reserved.
+# Copyright (C) 1997,1998,1999,2000,2003,2007 Slaven Rezic. All rights reserved.
 # This package is free software; you can redistribute it and/or
 # modify it under the same terms as Perl itself.
 #
-# Mail: slaven@rezic.de
-# WWW:  http://user.cs.tu-berlin.de/~eserte/
+# Mail: srezic@cpan.org
+# WWW:  http://www.rezic.de/eserte/
 #
 
 package Tk::Getopt;
-require 5.003;
+require 5.005; # calling CODE refs
 use strict;
 use vars qw($loadoptions $VERSION $x11_pass_through
 	    $CHECKMARK_OFF $CHECKMARK_ON
@@ -24,7 +24,8 @@ use constant OPTTYPE  => 1;
 use constant DEFVAL   => 2;
 use constant OPTEXTRA => 3;
 
-$VERSION = '0.49';
+$VERSION = '0.49_51';
+$VERSION = eval $VERSION;
 
 $DEBUG = 0;
 $x11_pass_through = 0;
@@ -217,7 +218,7 @@ sub load_options {
     foreach $opt ($self->_opt_array) {
 	if (exists $loadoptions->{$opt->[OPTNAME]}) {
 	    if (ref $self->_varref($opt) eq 'CODE') {
-		&{$self->_varref($opt)} if $loadoptions->{$opt->[OPTNAME]};
+		$self->_varref($opt)->($opt, $loadoptions->{$opt->[OPTNAME]}) if $loadoptions->{$opt->[OPTNAME]};
 	    } elsif (ref $self->_varref($opt) eq 'ARRAY' &&
 		     ref $loadoptions->{$opt->[OPTNAME]} eq 'ARRAY') {
 		@{ $self->_varref($opt) } = @{ $loadoptions->{$opt->[OPTNAME]} };
@@ -259,6 +260,8 @@ sub save_options {
 		    }
 		}
 	    }
+	    local $Data::Dumper::Sortkeys = $Data::Dumper::Sortkeys = 1;
+	    local $Data::Dumper::Indent = $Data::Dumper::Indent = 1;
 	    if (Data::Dumper->can('Dumpxs')) {
 		# use faster version of Dump
 		print OPT
@@ -370,16 +373,16 @@ sub usage {
 
 sub process_options {
     my($self, $former, $fromgui) = @_;
-    my $options = $self->{'options'};
-    foreach ($self->_opt_array) {
-	my $opt = $_->[OPTNAME];
+    my $bag = {};
+    foreach my $optdef ($self->_opt_array) {
+	my $opt = $optdef->[OPTNAME];
 
 	my $callback;
 	if ($fromgui) {
-	    $callback = $_->[OPTEXTRA]{'callback-interactive'};
+	    $callback = $optdef->[OPTEXTRA]{'callback-interactive'};
 	}
 	if (!$callback) {
-	    $callback = $_->[OPTEXTRA]{'callback'};
+	    $callback = $optdef->[OPTEXTRA]{'callback'};
 	}
 	if ($callback) {
 	    # no warnings here ... it would be too complicated to catch
@@ -389,25 +392,33 @@ sub process_options {
 	    # execute callback if value has changed
 	    if (!(defined $former
 		  && (!exists $former->{$opt}
-		      || $ {$self->_varref($_)} eq $former->{$opt}))) {
+		      || $ {$self->_varref($optdef)} eq $former->{$opt}))) {
 		local($^W) = $old_w; # fall back to original value
-		&$callback;
+		&$callback(optdef => $optdef, bag => $bag);
 	    }
 	}
-	if ($_->[OPTEXTRA]{'strict'} &&
-	    UNIVERSAL::isa($_->[OPTEXTRA]{'choices'},'ARRAY')) {
+	if ($optdef->[OPTEXTRA]{'strict'} &&
+	    UNIVERSAL::isa($optdef->[OPTEXTRA]{'choices'},'ARRAY')) {
 	    # check for valid values (valid are: choices and default value)
-	    my $v = $ {$self->_varref($_)};
-	    my @choices = @{$_->[OPTEXTRA]{'choices'}};
-	    push(@choices, $_->[DEFVAL]) if defined $_->[DEFVAL];
-	    if (!grep($_ eq $v, @choices)) {
+	    my $v = $ {$self->_varref($optdef)};
+	    my @choices = @{$optdef->[OPTEXTRA]{'choices'}};
+	    push(@choices, $optdef->[DEFVAL]) if defined $optdef->[DEFVAL];
+	    my $seen;
+	    for my $choice (@choices) {
+		my $value = (ref $choice eq 'ARRAY' ? $choice->[1] : $choice);
+		if ($value eq $v) {
+		    $seen = 1;
+		    last;
+		}
+	    }
+	    if (!$seen) {
 		if (defined $former) {
-		    warn "Not allowed: " . $ {$self->_varref($_)}
-		    . " for -$opt. Using old value $former->{$opt}";
-		    $ {$self->_varref($_)} = $former->{$opt};
+		    warn "Not allowed: " . $ {$self->_varref($optdef)}
+		       . " for -$opt. Using old value $former->{$opt}";
+		    $ {$self->_varref($optdef)} = $former->{$opt};
 		} else {
 		    die "Not allowed: "
-		      . $ {$self->_varref($_)} . " for -$opt\n"
+		      . $ {$self->_varref($optdef)} . " for -$opt\n"
 		      . "Allowed is only: " . join(", ", @choices);
 		}
 	    }
@@ -480,14 +491,24 @@ sub _float_widget {
 
 sub _list_widget {
     my($self, $frame, $opt) = @_;
+    if ($opt->[OPTEXTRA]{'strict'} && grep { ref $_ eq 'ARRAY' } @{$opt->[OPTEXTRA]{'choices'}}) {
+	$self->_optionmenu_widget($frame, $opt);
+    } else {
+	$self->_browseentry_widget($frame, $opt);
+    }
+}
+
+sub _browseentry_widget {
+    my($self, $frame, $opt) = @_;
     require Tk::BrowseEntry;
     my %args = (-variable => $self->_varref($opt));
     if ($opt->[OPTEXTRA]{'strict'}) {
 	$args{-state} = "readonly";
     }
     my $w = $frame->BrowseEntry(%args);
+    my %mapping;
     my @optlist = @{$opt->[OPTEXTRA]{'choices'}};
-    unshift(@optlist, $opt->[DEFVAL]) if defined $opt->[DEFVAL];
+    unshift @optlist, $opt->[DEFVAL] if defined $opt->[DEFVAL];
     my $o;
     my %seen;
     foreach $o (@optlist) {
@@ -495,6 +516,28 @@ sub _list_widget {
 	    $w->insert("end", $o);
 	    $seen{$o}++;
 	}
+    }
+    $w;
+}
+
+sub _optionmenu_widget {
+    my($self, $frame, $opt) = @_;
+    require Tk::Optionmenu;
+    my $varref = $self->_varref($opt);
+    # Have to remember value, otherwise Optionmenu would overwrite it...
+    my $value = $$varref;
+    my %args = (-variable => $varref,
+		-options => $opt->[OPTEXTRA]{'choices'},
+	       );
+    my $w = $frame->Optionmenu(%args);
+    if (defined $value) {
+	my $label = $value;
+	for my $choice (@{ $opt->[OPTEXTRA]{'choices'} }) {
+	    if (ref $choice eq 'ARRAY' && $choice->[1] eq $value) {
+		$label = $choice->[0];
+	    }
+	}
+	$w->setOption($label, $value);
     }
     $w;
 }
@@ -872,7 +915,7 @@ sub _create_page {
 			   my $t = $f->Toplevel
 			       (-title => $self->{_string}{"helpfor"}
 				. " $label");
-			   $t->Label(-text => $opt->[OPTEXTRA]{'longhelp'},
+			   $t->Message(-text => $opt->[OPTEXTRA]{'longhelp'},
 				     -justify => 'left')->pack;
 			   $t->Button(-text => 'OK',
 				      -command => sub { $t->destroy }
@@ -921,24 +964,33 @@ sub option_editor {
     my $transient = delete $a{'-transient'};
     my $use_statusbar = delete $a{'-statusbar'};
     my $wait      = delete $a{'-wait'};
-    my $string    = delete $a{'-string'};
+    my $string    = delete $a{'-string'} || {};
     my $delay_page_create = (exists $a{'-delaypagecreate'}
 			     ? delete $a{'-delaypagecreate'}
 			     : 1);
-    if (!defined $string) {
-	$string = {'optedit'    => 'Option editor',
-		   'undo'       => 'Undo',
-		   'lastsaved'  => 'Last saved',
-		   'save'       => 'Save',
-		   'defaults'   => 'Defaults',
-		   'ok'         => 'OK',
-		   'apply'      => 'Apply',
-		   'cancel'     => 'Cancel',
-		   'helpfor'    => 'Help for:',
-		   'oksave'     => 'OK',
-	          };
+    my $page      = delete $a{'-page'};
+    {
+	my %defaults = ('optedit'    => 'Option editor',
+			'undo'       => 'Undo',
+			'lastsaved'  => 'Last saved',
+			'save'       => 'Save',
+			'defaults'   => 'Defaults',
+			'ok'         => 'OK',
+			'apply'      => 'Apply',
+			'cancel'     => 'Cancel',
+			'helpfor'    => 'Help for:',
+			'oksave'     => 'OK',
+		       );
+	for my $key (keys %defaults) {
+	    next if exists $string->{$key};
+	    $string->{$key} = $defaults{$key};
+	}
     }
     $self->{_string} = $string;
+
+    if (defined $page) {
+	$self->{'raised'} = $page;
+    }
 
     # store old values for undo
     my %undo_options;
@@ -980,9 +1032,12 @@ sub option_editor {
     die "$@ while evaling $cmd" if $@;
     $opt_editor->transient($transient) if $transient;
     eval { $opt_editor->configure(-title => $string->{optedit}) };
+
     my $opt_notebook = ($dont_use_notebook ?
 			$opt_editor->Frame :
 			$opt_editor->NoteBook(-ipadx => 6, -ipady => 6));
+    $self->{Frame} = $opt_notebook;
+
     my($statusbar, $balloon);
     if (!$dont_use_balloon) {
 	if ($use_statusbar) {
@@ -1205,7 +1260,7 @@ sub option_editor {
     &$callback($self, $opt_editor) if $callback;
 
     if (!$dont_use_notebook && defined $self->{'raised'}) {
-	$opt_notebook->raise($self->{'raised'});
+	$self->raise_page($self->{'raised'});
     }
 
     $opt_editor->bind('<Escape>' => sub { $cancel_button->invoke });
@@ -1274,6 +1329,13 @@ sub _get_curr_geometry_args {
     } else {
 	(-text => "Geom.");
     }
+}
+
+sub raise_page {
+    my($self, $page) = @_;
+    my $opt_notebook = $self->{Frame};
+    $page = lc $page; # always lowercase in NoteBook internals
+    $opt_notebook->raise($page);
 }
 
 1;
@@ -1520,6 +1582,12 @@ least the OK and Cancel buttons. The default set looks like this:
 
     -buttons => [qw/ok apply cancel undo lastsaved save defaults/]
 
+A minimal set could look like (here OK means accept and save)
+
+    -buttons => [qw/oksave cancel/]
+
+(and using less buttons is recommended).
+
 =item -toplevel
 
 Use another widget class instead of B<Toplevel> for embedding the
@@ -1551,13 +1619,18 @@ Use an additional status bar for help messages.
 
 =item -string
 
-Change button labels and title. This argument should be a hash reference
-with following keys: C<optedit>, C<undo>, C<lastsaved>, C<save>, C<defaults>,
-C<ok>, C<cancel>, C<helpfor>.
+Change button labels and title. This argument should be a hash
+reference with all or a subset of the following keys: C<optedit>,
+C<undo>, C<lastsaved>, C<save>, C<defaults>, C<ok>, C<cancel>,
+C<helpfor>.
 
 =item -wait
 
 Do not return immediately, but rather wait for the user pressing OK or Cancel.
+
+=item -page
+
+Raise the named notebook page (if grouping is used, see below).
 
 =back
 
@@ -1634,7 +1707,21 @@ An array of aliases also accepted by F<Getopt::Long>.
 =item callback
 
 Call a subroutine every time the option changes (e.g. after pressing
-on Apply, Ok or after loading).
+on Apply, Ok or after loading). The callback will get a hash with the
+following keys as argument:
+
+=over
+
+=item optdef
+
+The opttable item definition for this option.
+
+=item bag
+
+A hash reference which is persistent for this L</process_options>
+call. This can be used to share state between multiple callbacks.
+
+=back
 
 =item callback-interactive
 
@@ -1656,6 +1743,19 @@ A long help string used by B<option_editor>.
 =item choices
 
 An array of additional choices for the option editor.
+
+If C<strict> is set to a true value, then the elements of choices may
+also contain array references. In this case the first value of the
+"sub" array references are the display labels and the second value
+the used value. This is similar to L<Tk::Optionmenu> (in fact, for
+displaying this option an Optionmenu is used).
+
+     choices => ["one", "two", "three"]
+
+     choices => [["english"  => "en"],
+		 ["deutsch"  => "de"],
+		 ["hrvatski" => "hr"]]
+
 
 =item range
 
@@ -1823,6 +1923,15 @@ This manual is confusing. In fact, the whole module is confusing.
 
 Setting variables in the editor should not set immediately the real variables.
 This should be done only by Apply and Ok buttons.
+
+There's no -font option (you have to use tricks with the option db and
+a special Name for the option editor):
+
+    $top->optionAdd("*somename*font" => $font);
+    $opt->option_editor(Name => "somename", ...);
+
+There's no (easy) way to get a large option editor fit on small
+screens. Try -font, if it would exist, but see above.
 
 =head1 AUTHOR
 

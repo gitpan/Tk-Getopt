@@ -1,21 +1,32 @@
+#!/usr/bin/perl -w
 # -*- perl -*-
-# Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl test.pl'
 
-######################### We start with some black magic to print on failure.
+#
+# $Id: gui.t,v 1.14 2006/10/11 20:22:19 eserte Exp $
+# Author: Slaven Rezic
+#
 
-# Change 1..1 below to 1..last_test_to_print .
-# (It may become useful if the test is moved to ./t subdirectory.)
+use strict;
 
-BEGIN { $| = 1; print "1..1\n"; }
+BEGIN {
+    if (!eval q{
+	use Data::Dumper;
+	use Test::More;
+	use Tk;
+	1;
+    }) {
+	print "1..0 # skip: no Data::Dumper, Test::More and/or Tk modules\n";
+	exit;
+    }
+}
 
-END {print "not ok 1\n" unless $loaded;}
+plan tests => 3;
 
-use Tk;
-use Tk::Getopt;
-$loaded = 1;
+use_ok("Tk::Getopt");
 
-@opttable =
+my $top;
+my $options = {};
+my @opttable =
   (#'loading',
    ['adbfile', '=s', undef,
     {'alias' => ['f'],
@@ -109,7 +120,12 @@ $loaded = 1;
    ['debug', '!', 0, {'alias' => ['d']}],
    ['lang', '=s', undef,
     {'choices' => ['en', 'de', 'hr'], 'strict' => 1,
-     'label' => 'Language'}],
+     'label' => 'Language (with Browseentry)'}],
+   ['lang-alt', '=s', "hr",
+    {'choices' => [["english" => 'en'],
+		   ["deutsch" => 'de'],
+		   ["hrvatski" => 'hr']], 'strict' => 1,
+     'label' => 'Language (with Optionmenu)'}],
    ['stderr-extern', '!', 0,
     'callback-interactive' => sub { warn "Only called from GUI!" },
    ],
@@ -157,11 +173,11 @@ $loaded = 1;
 
   );
 
-$options = {};
-$optfilename = "t/opttest";
-$opt = new Tk::Getopt(-opttable => \@opttable,
-		      -options => $options,
-		      -filename => $optfilename);
+my $optfilename = "t/opttest";
+my $opt = Tk::Getopt->new(-opttable => \@opttable,
+			  -options  => $options,
+			  -filename => $optfilename);
+isa_ok($opt, "Tk::Getopt");
 
 $opt->set_defaults;
 $opt->load_options;
@@ -178,38 +194,51 @@ $opt->process_options;
 if ($@) { warn $@ }
 
 my $w;
-use Data::Dumper;
 
 if (!defined $ENV{BATCH}) { $ENV{BATCH} = 1 }
 
 my $batch_mode = !!$ENV{BATCH};
 my $timerlen = ($batch_mode ? 1000 : 60*1000);
 
-$timer = $top->after
-    ($timerlen,
-     sub {
-	 if ($batch_mode) {
-	     foreach ($top->children) {
-		 $_->destroy;
+my $timer;
+sub setup_timer {
+    $timer = $top->after
+	($timerlen,
+	 sub {
+	     if ($batch_mode) {
+		 foreach ($top->children) {
+		     $_->destroy;
+		 }
+	     } else {
+		 my $t2 = $top->Toplevel(-popover => 'cursor');
+		 $t2->Label(-text => "Self-destruction in 5s")->pack;
+		 $t2->Popup;
+		 $top->after(5*1000, sub {
+				 foreach ($top->children) {
+				     $_->destroy;
+				 }
+			     });
 	     }
-	 } else {
-	     $t2 = $top->Toplevel(-popover => 'cursor');
-	     $t2->Label(-text => "Self-destruction in 5s")->pack;
-	     $t2->Popup;
-	     $top->after(5*1000, sub {
-			     foreach ($top->children) {
-				 $_->destroy;
-			     }
-			 });
-	 }
-     });
+	 });
+}
 
+setup_timer();
 $w = $opt->option_editor($top,
 			 -statusbar => 1,
 			 -popover => 'cursor',
 			 '-wait' => 1);
 $timer->cancel;
 
+setup_timer();
+# Should show x11 page
+$w = $opt->option_editor($top,
+			 -statusbar => 1,
+			 -popover => 'cursor',
+			 -page => 'x11',
+			 '-wait' => 1);
+$timer->cancel;
+
+# Should the same page again
 $w = $opt->option_editor($top,
 			 -transient => $top,
                          -buttons => [qw/ok apply cancel defaults/],
@@ -219,6 +248,8 @@ $w->resizable(0,0);
 $w->OnDestroy(sub {$top->destroy});
 
 $timerlen = ($batch_mode ? 1000 : 5*1000);
+
+$top->after($timerlen/2, sub { $opt->raise_page("extern") });
 $top->after($timerlen, sub { $w->destroy });
 
 #$top->WidgetDump;
@@ -227,5 +258,6 @@ MainLoop;
 #foreach (sort keys %$options) {
 #    print "$_ = ", $options->{$_}, "\n";
 #}
-print "ok 1\n";
+pass("Hopefully everything went ok");
+
 
