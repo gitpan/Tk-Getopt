@@ -2,7 +2,7 @@
 # -*- perl -*-
 
 #
-# $Id: gui2.t,v 1.5 2006/10/11 20:27:11 eserte Exp $
+# $Id: gui2.t,v 1.7 2008/01/06 18:37:04 eserte Exp $
 # Author: Slaven Rezic
 #
 
@@ -20,7 +20,7 @@ BEGIN {
     }
 }
 
-plan tests => 4;
+plan tests => 12;
 
 use Tk::Getopt;
 
@@ -58,7 +58,14 @@ my @opttable =
 			   'help' => $dialbug}],
    ['defint', '=i', 50,
     {'range' => [0, 100],
-     'widget' => sub { shift->Tk::Getopt::_number_widget(@_)}}]);
+     'widget' => sub { shift->Tk::Getopt::_number_widget(@_)},
+    },
+   ],
+   ['numentry', '=i', 50,
+    range => [0, 100],
+    widget => sub { numentry_widget(@_) },
+   ],
+  );
 
 my $opt = new MyOptions(-opttable => \@opttable);
 isa_ok($opt, "MyOptions");
@@ -91,4 +98,29 @@ sub in_frame {
     $e->waitWindow;
     ok(1);
     $top->destroy;
+}
+
+sub numentry_widget {
+    my($self, $frame, $opt) = @_;
+    my $NumEntry = "NumEntry";
+    my $v_old = $self->_varref($opt); # old
+    my $v = $self->varref($opt); # new
+    is($v_old, $v, "varref and old _varref method return the same");
+    my $range = $self->optextra($opt, "range");
+    is($range->[0], 0, "Expexted lower range");
+    is($range->[1], 100, "Expexted high range");
+    ok(!defined $self->optextra($opt, "foodoesnotexist"), "Unexistent optextra argument");
+    my @NumEntryArgs = (-minvalue => $range->[0],
+			-maxvalue => $range->[1],
+			-value => $$v,
+		       );
+    if (!eval { require Tk::NumEntry; 1 }) {
+	diag "Tk::NumEntry not available, fallback to plain Tk::Entry";
+	$NumEntry = "Entry";
+	@NumEntryArgs = ();
+    }
+
+    $frame->$NumEntry(@NumEntryArgs,
+		      -textvariable => $v,
+		     );
 }
