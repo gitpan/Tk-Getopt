@@ -1,12 +1,18 @@
 --- #YAML:1.0
 name:                Tk-Getopt
-version:             0.49_53
-abstract:            ~
-license:             ~
-author:              ~
+version:             0.49_54
+abstract:            User configuration window for Tk with interface to Getopt::Long
+license:             perl
+author:              
+    - Slaven Rezic <srezic@cpan.org>
 generated_by:        ExtUtils::MakeMaker version 6.42
 distribution_type:   module
 requires:     
 meta-spec:
     url:     http://module-build.sourceforge.net/META-spec-v1.3.html
     version: 1.3
+recommends:
+    Tk: 804
+    Tk::FontDialog: 0
+    Data::Dumper: 0
+    Test::More: 0
